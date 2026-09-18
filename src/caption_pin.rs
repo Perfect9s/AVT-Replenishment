@@ -302,6 +302,17 @@ mod tests {
             SendMessageW(pin, WM_LBUTTONDOWN, 0, coord);
             SendMessageW(pin, WM_LBUTTONUP, 0, coord);
             assert_eq!(GetWindowLongW(owner, GWL_EXSTYLE) as u32 & WS_EX_TOPMOST, 0);
+            let mut unchanged: RECT = zeroed();
+            GetWindowRect(owner, &mut unchanged);
+            assert_eq!(
+                (wr.left, wr.top, wr.right, wr.bottom),
+                (
+                    unchanged.left,
+                    unchanged.top,
+                    unchanged.right,
+                    unchanged.bottom
+                )
+            );
             SetWindowPos(owner, null_mut(), 200, 150, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
             owner_event(owner, WM_WINDOWPOSCHANGED);
             let mut moved: RECT = zeroed();

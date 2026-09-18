@@ -344,47 +344,6 @@ mod tests {
     }
 }
 
-#[cfg(all(test, windows))]
-mod native_tests {
-    use super::windows::set_topmost;
-    use std::ptr::null_mut;
-    use windows_sys::Win32::UI::WindowsAndMessaging::*;
-    #[test]
-    fn pin_toggles_without_moving_or_resizing() {
-        unsafe {
-            let class: Vec<u16> = "STATIC\0".encode_utf16().collect();
-            let hwnd = CreateWindowExW(
-                0,
-                class.as_ptr(),
-                class.as_ptr(),
-                WS_OVERLAPPEDWINDOW,
-                40,
-                50,
-                400,
-                300,
-                null_mut(),
-                null_mut(),
-                null_mut(),
-                null_mut(),
-            );
-            assert!(!hwnd.is_null());
-            let mut before = std::mem::zeroed();
-            assert_ne!(GetWindowRect(hwnd, &mut before), 0);
-            set_topmost(hwnd, true).unwrap();
-            assert_ne!(GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_TOPMOST, 0);
-            set_topmost(hwnd, false).unwrap();
-            assert_eq!(GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_TOPMOST, 0);
-            let mut after = std::mem::zeroed();
-            assert_ne!(GetWindowRect(hwnd, &mut after), 0);
-            assert_eq!(
-                (before.left, before.top, before.right, before.bottom),
-                (after.left, after.top, after.right, after.bottom)
-            );
-            DestroyWindow(hwnd);
-        }
-    }
-}
-
 pub fn asset_redirect_path(url: &str) -> Result<&str> {
     let path = url
         .strip_prefix("https://release-assets.githubusercontent.com/")
