@@ -97,6 +97,8 @@ fn valid_dir(dir: &Path, target: &Path) -> bool {
             .is_some_and(|n| n.to_string_lossy().starts_with(".avt-update-"))
 }
 fn install(target: &Path, pid: u32, expected: &str) -> Result<()> {
+    let target_path = target.canonicalize()?;
+    let target = target_path.as_path();
     let dir = std::env::current_exe()?
         .canonicalize()?
         .parent()
