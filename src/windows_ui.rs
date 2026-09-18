@@ -29,7 +29,6 @@ const ACK: i32 = 107;
 const FILL: i32 = 108;
 const SUMMARY: i32 = 109;
 const STATUS: i32 = 110;
-const PIN: i32 = 111;
 const UPDATE: i32 = 112;
 const AUTHORIZE: i32 = 113;
 const FORGET: i32 = 114;
@@ -372,7 +371,6 @@ impl State {
         let table_h = (h - 430).max(130);
         for (id, x, y, ww, hh) in [
             (1, 24, 18, 260, 34),
-            (PIN, w - 596, 20, 108, 30),
             (UPDATE, w - 480, 18, 108, 34),
             (AUTHORIZE, w - 364, 18, 94, 34),
             (FORGET, w - 262, 18, 94, 34),
@@ -417,6 +415,7 @@ impl State {
     }
 }
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    avt_replenishment::caption_pin::owner_event(hwnd, msg);
     if msg == WM_CREATE {
         let scale = GetDpiForWindow(hwnd) as f64 / 96.0;
         let font = CreateFontW(
@@ -465,12 +464,6 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         });
         s.control(1, "STATIC", "AVT  补货计划填充", 0);
         SendMessageW(s.c(1), WM_SETFONT, title_font as usize, 1);
-        s.control(
-            PIN,
-            "BUTTON",
-            "图钉置顶",
-            WS_TABSTOP | BS_AUTOCHECKBOX as u32,
-        );
         s.control(UPDATE, "BUTTON", "检查更新", WS_TABSTOP);
         s.control(AUTHORIZE, "BUTTON", "更新授权", WS_TABSTOP);
         s.control(FORGET, "BUTTON", "清除授权", WS_TABSTOP);
@@ -555,6 +548,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         SetTimer(hwnd, 1, 100, None);
         // State becomes reachable only after controls are fully created.
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, Box::into_raw(s) as isize);
+        avt_replenishment::caption_pin::create(hwnd);
         PostMessageW(hwnd, WM_APP + 1, 0, 0);
         return 0;
     }
@@ -614,18 +608,6 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         WM_SIZE => s.layout(),
         WM_TIMER => s.poll(),
         WM_COMMAND => match (wp & 0xffff) as i32 {
-            PIN => {
-                let pinned = SendMessageW(s.c(PIN), BM_GETCHECK, 0, 0) == BST_CHECKED as isize;
-                if let Err(e) = updater::set_topmost(hwnd, pinned) {
-                    SendMessageW(
-                        s.c(PIN),
-                        BM_SETCHECK,
-                        if pinned { BST_UNCHECKED } else { BST_CHECKED } as usize,
-                        0,
-                    );
-                    text(s.c(STATUS), &e.to_string());
-                }
-            }
             UPDATE => s.check_update(),
             FORGET => {
                 s.token = None;

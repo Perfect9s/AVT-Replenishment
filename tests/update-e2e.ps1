@@ -15,6 +15,22 @@ $helper = $null
 try {
   Start-Sleep -Seconds 2
   if ($old.HasExited) { throw 'Original program did not remain running' }
+  Add-Type -AssemblyName System.Drawing
+  Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+public class CaptionCapture {
+ [DllImport("user32.dll")] public static extern bool MoveWindow(IntPtr h,int x,int y,int w,int hgt,bool repaint);
+}
+'@
+  $old.Refresh()
+  [CaptionCapture]::MoveWindow($old.MainWindowHandle,20,20,960,640,$true) | Out-Null
+  Start-Sleep -Seconds 1
+  $image = New-Object System.Drawing.Bitmap(960,80)
+  $graphics = [System.Drawing.Graphics]::FromImage($image)
+  $graphics.CopyFromScreen(20,20,0,0,$image.Size)
+  $image.Save((Join-Path (Get-Location) 'target/caption-preview.png'))
+  $graphics.Dispose(); $image.Dispose()
   $helper = Start-Process -FilePath (Join-Path $stage 'helper.exe') -ArgumentList @('--avt-install-update', ('"' + $app + '"'), $old.Id, $expected) -PassThru
   Start-Sleep -Seconds 1
   Stop-Process -Id $old.Id -Force
