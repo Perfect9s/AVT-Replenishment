@@ -127,7 +127,9 @@ fn install(target: &Path, pid: u32, expected: &str) -> Result<()> {
     });
     if let Err(e) = result {
         // Restore through a same-volume atomic replacement if target still exists.
-        if target.exists() {
+        if target.exists() && hash(target).ok() == hash(&old).ok() {
+            // Replacement failed before any change; keep the untouched original.
+        } else if target.exists() {
             replace(target, &old).context("恢复旧程序失败，旧程序保留在更新目录的 old.exe")?;
         } else {
             fs::copy(&old, target).context("恢复旧程序失败")?;
