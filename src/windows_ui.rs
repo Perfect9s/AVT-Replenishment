@@ -624,7 +624,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         _ => {
             if msg == WM_APP + 1 {
                 if let Some(p) = std::env::args_os().nth(1) {
-                    s.start(PathBuf::from(p));
+                    if p != "--avt-clean-update" {
+                        s.start(PathBuf::from(p));
+                    }
                 }
             }
         }
