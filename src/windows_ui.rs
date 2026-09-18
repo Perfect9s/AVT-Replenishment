@@ -629,6 +629,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             UPDATE => s.check_update(),
             FORGET => {
                 s.token = None;
+                s.available = None;
+                EnableWindow(s.c(RELEASE), 0);
                 match updater::forget_token() {
                     Ok(()) => {
                         text(
