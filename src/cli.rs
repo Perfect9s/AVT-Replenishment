@@ -1,0 +1,34 @@
+use avt_replenishment::core::{execute, inspect};
+fn main() -> anyhow::Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+    #[cfg(windows)]
+    if args.get(1).is_some_and(|a| a == "check-update") {
+        use std::io::Read;
+        let mut token = zeroize::Zeroizing::new(String::new());
+        std::io::stdin().take(1025).read_to_string(&mut token)?;
+        let update = avt_replenishment::updates::windows::check_latest(token.trim())?;
+        println!(
+            "current={} latest={} update_available={} release={}",
+            avt_replenishment::updates::VERSION,
+            update.latest,
+            update.newer,
+            update.release_url
+        );
+        return Ok(());
+    }
+    if args.len() < 3 {
+        anyhow::bail!("Usage: avt-cli inspect <xlsx> | apply <xlsx> [--backup]");
+    }
+    let plan = inspect(std::path::Path::new(&args[2]))?;
+    if args[1] == "inspect" {
+        println!("{}", serde_json::to_string_pretty(&plan)?);
+    } else if args[1] == "apply" {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&execute(&plan, args.iter().any(|s| s == "--backup"))?)?
+        );
+    } else {
+        anyhow::bail!("Unknown command");
+    }
+    Ok(())
+}

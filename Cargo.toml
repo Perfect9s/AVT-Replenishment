@@ -1,0 +1,37 @@
+[package]
+name = "avt-replenishment"
+version = "1.1.0"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+anyhow = "1"
+calamine = "0.26"
+chrono = "0.4"
+csv = "1.3"
+encoding_rs = "0.8"
+regex = "1"
+roxmltree = "0.20"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+semver = "1"
+zeroize = "1"
+tempfile = "3"
+zip = { version = "0.6", default-features = false, features = ["deflate"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_UI_Controls", "Win32_UI_Shell", "Win32_UI_Controls_Dialogs", "Win32_System_LibraryLoader", "Win32_UI_HiDpi", "Win32_UI_Input_KeyboardAndMouse", "Win32_Networking_WinHttp", "Win32_Security_Credentials"] }
+
+[profile.release]
+opt-level = "s"
+lto = "thin"
+strip = true
+
+[[bin]]
+name = "AVT-Replenishment"
+path = "src/main.rs"
+
+[[bin]]
+name = "avt-cli"
+path = "src/cli.rs"
