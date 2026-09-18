@@ -4,6 +4,7 @@ mod windows_ui;
 #[cfg(windows)]
 fn main() {
     if !avt_replenishment::self_update::handle_args() {
+        let _ = avt_replenishment::updates::windows::forget_token();
         windows_ui::run();
     }
 }

@@ -17,7 +17,6 @@ use windows_sys::Win32::{
         WindowsAndMessaging::*,
     },
 };
-use zeroize::Zeroizing;
 
 const PATH: i32 = 101;
 const PICK: i32 = 102;
@@ -30,8 +29,6 @@ const FILL: i32 = 108;
 const SUMMARY: i32 = 109;
 const STATUS: i32 = 110;
 const UPDATE: i32 = 112;
-const AUTHORIZE: i32 = 113;
-const FORGET: i32 = 114;
 const RELEASE: i32 = 115;
 enum Job {
     Inspect(Result<Plan, String>),
@@ -48,7 +45,6 @@ struct State {
     plan: Option<Plan>,
     worker: Option<Receiver<Job>>,
     done: bool,
-    token: Option<Zeroizing<String>>,
     available: Option<UpdateInfo>,
 }
 fn wide(s: &str) -> Vec<u16> {
@@ -89,9 +85,7 @@ impl State {
         SendMessageW(h, WM_SETFONT, self.font as usize, 1);
     }
     unsafe fn set_busy(&self, busy: bool) {
-        for id in [
-            PATH, PICK, SCAN, BACKUP, ACK, UPDATE, AUTHORIZE, FORGET, RELEASE,
-        ] {
+        for id in [PATH, PICK, SCAN, BACKUP, ACK, UPDATE, RELEASE] {
             EnableWindow(self.c(id), (!busy) as i32);
         }
         EnableWindow(
@@ -168,13 +162,6 @@ impl State {
         if self.worker.is_some() {
             return;
         }
-        let Some(token) = self.token.clone() else {
-            text(
-                self.c(STATUS),
-                "请先设置更新授权，私有仓库需要只读 GitHub Token。",
-            );
-            return;
-        };
         let (tx, rx) = mpsc::channel();
         self.worker = Some(rx);
         self.set_busy(true);
@@ -182,7 +169,7 @@ impl State {
         text(self.c(STATUS), "正在检查 GitHub 正式版本…");
         std::thread::spawn(move || {
             let _ = tx.send(Job::Update(
-                updater::check_latest(&token).map_err(|e| format!("{e:#}")),
+                updater::check_latest().map_err(|e| format!("{e:#}")),
             ));
         });
     }
@@ -190,7 +177,7 @@ impl State {
         if self.worker.is_some() {
             return;
         }
-        let (Some(token), Some(info)) = (self.token.clone(), self.available.clone()) else {
+        let Some(info) = self.available.clone() else {
             return;
         };
         if !info.newer {
@@ -204,7 +191,7 @@ impl State {
             "正在下载并校验新版，请稍候。成功后自动重启；补货表不会修改。",
         );
         std::thread::spawn(move || {
-            let result = updater::download_update(&token, &info)
+            let result = updater::download_update(&info)
                 .and_then(|bytes| avt_replenishment::self_update::prepare(&bytes));
             let _ = tx.send(Job::Download(result.map_err(|e| format!("{e:#}"))));
         });
@@ -371,9 +358,7 @@ impl State {
         let table_h = (h - 430).max(130);
         for (id, x, y, ww, hh) in [
             (1, 24, 18, 260, 34),
-            (UPDATE, w - 480, 18, 108, 34),
-            (AUTHORIZE, w - 364, 18, 94, 34),
-            (FORGET, w - 262, 18, 94, 34),
+            (UPDATE, w - 276, 18, 108, 34),
             (RELEASE, w - 160, 18, 136, 34),
             (2, 24, 59, w - 48, 25),
             (PATH, 24, 99, w - 240, 32),
@@ -459,14 +444,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             plan: None,
             worker: None,
             done: false,
-            token: updater::load_token().unwrap_or(None),
             available: None,
         });
         s.control(1, "STATIC", "AVT  补货计划填充", 0);
         SendMessageW(s.c(1), WM_SETFONT, title_font as usize, 1);
         s.control(UPDATE, "BUTTON", "检查更新", WS_TABSTOP);
-        s.control(AUTHORIZE, "BUTTON", "更新授权", WS_TABSTOP);
-        s.control(FORGET, "BUTTON", "清除授权", WS_TABSTOP);
         s.control(RELEASE, "BUTTON", "下载并更新", WS_TABSTOP);
         EnableWindow(s.c(RELEASE), 0);
         s.control(
@@ -574,57 +556,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
     if ptr.is_null() {
         return DefWindowProcW(hwnd, msg, wp, lp);
     }
-    // Native credential dialogs pump messages. Do not hold a mutable State
-    // reference while the modal dialog is active.
-    if msg == WM_COMMAND {
-        let command = (wp & 0xffff) as i32;
-        if (command == AUTHORIZE || (command == UPDATE && (*ptr).token.is_none()))
-            && (*ptr).worker.is_none()
-        {
-            let result = updater::prompt_token(hwnd);
-            let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut State;
-            if ptr.is_null() {
-                return 0;
-            }
-            let s = &mut *ptr;
-            match result {
-                Ok(Some(token)) => {
-                    s.token = Some(token);
-                    text(s.c(STATUS), "更新授权已设置，点击“检查更新”连接私有仓库。");
-                    if command == UPDATE {
-                        s.check_update();
-                    }
-                }
-                Ok(None) => (),
-                Err(e) => {
-                    text(s.c(STATUS), &format!("更新授权未保存：{e:#}"));
-                }
-            }
-            return 0;
-        }
-    }
     let s = &mut *ptr;
     match msg {
         WM_SIZE => s.layout(),
         WM_TIMER => s.poll(),
         WM_COMMAND => match (wp & 0xffff) as i32 {
             UPDATE => s.check_update(),
-            FORGET => {
-                s.token = None;
-                s.available = None;
-                EnableWindow(s.c(RELEASE), 0);
-                match updater::forget_token() {
-                    Ok(()) => {
-                        text(
-                            s.c(STATUS),
-                            "已清除本次会话及 Windows 凭据管理器中的更新授权。",
-                        );
-                    }
-                    Err(e) => {
-                        text(s.c(STATUS), &e.to_string());
-                    }
-                }
-            }
             RELEASE => s.download_update(),
             PICK => {
                 let mut path = vec![0u16; 32768];

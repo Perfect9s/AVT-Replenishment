@@ -34,27 +34,15 @@ struct Asset {
     size: u64,
 }
 
-pub fn validate_token(token: &str) -> Result<()> {
-    if token.is_empty()
-        || token.len() > 4096
-        || !token
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"-._~+/=".contains(&b))
-    {
-        bail!("请填写有效的 GitHub Token；不要填写 GitHub 登录密码。");
-    }
-    Ok(())
-}
-
 pub fn parse_release(status: u32, bytes: &[u8], current: &str) -> Result<UpdateInfo> {
     match status {
         200 => (),
-        401 => bail!("GitHub 授权无效或已过期，请重新设置更新授权。"),
-        403 | 429 => bail!("GitHub 拒绝请求或已限流，请确认该仓库的 Contents 只读权限，稍后重试。"),
+        401 => bail!("更新服务拒绝了请求，请稍后重试。"),
+        403 | 429 => bail!("GitHub 请求频率达到限制，请稍后重试。"),
         404 => {
-            bail!("无法读取私有仓库的最新版本：可能尚未发布正式版本，或 Token 未获该仓库访问权限。")
+            bail!("暂时无法找到最新正式版本，请稍后重试。")
         }
-        300..=399 => bail!("更新地址发生重定向。为避免将凭据发送到其他地址，本次检查已停止。"),
+        300..=399 => bail!("更新地址发生重定向。本次检查已停止。"),
         _ => bail!("更新检查失败（HTTP {status}），请稍后重试。"),
     }
     if bytes.len() > 2 * 1024 * 1024 {
@@ -96,14 +84,13 @@ pub mod windows {
     use super::*;
     use std::{
         ffi::c_void,
-        mem::{size_of, zeroed},
+        mem::size_of,
         ptr::{null, null_mut},
         time::{Duration, Instant},
     };
     use windows_sys::Win32::{
         Foundation::*, Networking::WinHttp::*, Security::Credentials::*, UI::WindowsAndMessaging::*,
     };
-    use zeroize::Zeroizing;
     const TARGET: &str = "AVT-Replenishment/GitHub/Perfect9s/AVT-Replenishment";
     fn wide(s: &str) -> Vec<u16> {
         s.encode_utf16().chain(Some(0)).collect()
@@ -135,21 +122,13 @@ pub mod windows {
         }
     }
 
-    pub fn check_latest(token: &str) -> Result<UpdateInfo> {
-        validate_token(token)?;
-        let (status, bytes, _) = request(
-            "api.github.com",
-            API_PATH,
-            Some(token),
-            false,
-            2 * 1024 * 1024,
-        )?;
+    pub fn check_latest() -> Result<UpdateInfo> {
+        let (status, bytes, _) = request("api.github.com", API_PATH, false, 2 * 1024 * 1024)?;
         parse_release(status, &bytes, VERSION)
     }
     fn request(
         host: &str,
         path: &str,
-        token: Option<&str>,
         binary: bool,
         limit: usize,
     ) -> Result<(u32, Vec<u8>, Option<String>)> {
@@ -190,14 +169,8 @@ pub mod windows {
             } else {
                 "application/vnd.github+json"
             };
-            let mut headers = Zeroizing::new(format!(
-                "Accept: {accept}\r\nX-GitHub-Api-Version: 2022-11-28\r\n"
-            ));
-            if let Some(token) = token {
-                validate_token(token)?;
-                headers.push_str(&format!("Authorization: Bearer {token}\r\n"));
-            }
-            let h = Zeroizing::new(wide(&headers));
+            let headers = format!("Accept: {accept}\r\nX-GitHub-Api-Version: 2022-11-28\r\n");
+            let h = wide(&headers);
             check(
                 WinHttpSendRequest(request.0, h.as_ptr(), (h.len() - 1) as u32, null(), 0, 0, 0),
                 "无法连接 GitHub，请检查网络或系统代理",
@@ -274,7 +247,7 @@ pub mod windows {
             Ok((status, bytes, None))
         }
     }
-    pub fn download_update(token: &str, info: &UpdateInfo) -> Result<Vec<u8>> {
+    pub fn download_update(info: &UpdateInfo) -> Result<Vec<u8>> {
         if info.asset_id == 0 || info.asset_size > 64 * 1024 * 1024 {
             bail!("更新包信息不完整或过大。");
         }
@@ -284,7 +257,7 @@ pub mod windows {
             .context("更新包缺少 SHA-256 校验值，已停止更新")?;
         let path = format!("/repos/{REPOSITORY}/releases/assets/{}", info.asset_id);
         let (mut status, mut bytes, location) =
-            request("api.github.com", &path, Some(token), true, 64 * 1024 * 1024)?;
+            request("api.github.com", &path, true, 64 * 1024 * 1024)?;
         if status == 302 {
             let location = location.context("缺少下载地址")?;
             let path = super::asset_redirect_path(&location)?;
@@ -292,43 +265,17 @@ pub mod windows {
             (status, bytes, _) = request(
                 "release-assets.githubusercontent.com",
                 path,
-                None,
                 true,
                 64 * 1024 * 1024,
             )?;
         }
         if status != 200 {
-            bail!("更新包下载失败（HTTP {status}）。请确认 Token 的仓库只读权限。");
+            bail!("更新包下载失败（HTTP {status}）。请检查网络后重试。");
         }
         super::verify_package(&bytes, info.asset_size, digest)?;
         Ok(bytes)
     }
 
-    pub fn load_token() -> Result<Option<Zeroizing<String>>> {
-        unsafe {
-            let mut credential: *mut CREDENTIALW = null_mut();
-            if CredReadW(wide(TARGET).as_ptr(), CRED_TYPE_GENERIC, 0, &mut credential) == 0 {
-                if GetLastError() == ERROR_NOT_FOUND {
-                    return Ok(None);
-                }
-                bail!("无法读取 Windows 凭据管理器，请重新设置更新授权。");
-            }
-            let result = if (*credential).CredentialBlobSize == 0 {
-                None
-            } else {
-                let bytes = std::slice::from_raw_parts(
-                    (*credential).CredentialBlob,
-                    (*credential).CredentialBlobSize as usize,
-                );
-                Some(Zeroizing::new(String::from_utf8_lossy(bytes).into_owned()))
-            };
-            CredFree(credential.cast());
-            if let Some(t) = &result {
-                validate_token(t)?;
-            }
-            Ok(result)
-        }
-    }
     pub fn forget_token() -> Result<()> {
         unsafe {
             if CredDeleteW(wide(TARGET).as_ptr(), CRED_TYPE_GENERIC, 0) == 0
@@ -338,78 +285,6 @@ pub mod windows {
             }
             Ok(())
         }
-    }
-    fn save_token(token: &str) -> Result<()> {
-        unsafe {
-            validate_token(token)?;
-            if token.len() > 2560 {
-                bail!("Token 过长，无法保存到凭据管理器；请不勾选保存，或使用仓库只读 Personal Access Token。");
-            }
-            let mut target = wide(TARGET);
-            let mut user = wide("GitHub Token");
-            let cred = CREDENTIALW {
-                Type: CRED_TYPE_GENERIC,
-                TargetName: target.as_mut_ptr(),
-                CredentialBlobSize: token.len() as u32,
-                CredentialBlob: token.as_ptr() as *mut u8,
-                Persist: CRED_PERSIST_LOCAL_MACHINE,
-                UserName: user.as_mut_ptr(),
-                ..zeroed()
-            };
-            check(CredWriteW(&cred, 0), "无法保存到 Windows 凭据管理器")
-        }
-    }
-    /// Uses the Windows credential dialog; token is never written to a config/log file.
-    /// # Safety
-    /// Owner must be a valid window handle. Caller must not hold references to window state across this modal call.
-    pub unsafe fn prompt_token(owner: HWND) -> Result<Option<Zeroizing<String>>> {
-        let message = wide("用户名可保持 GitHub；密码栏填写 GitHub Token（不是登录密码）。\n仅授权 Perfect9s/AVT-Replenishment，Contents: Read-only。\n勾选保存则存入 Windows 凭据管理器；不勾选则仅本次会话使用。");
-        let caption = wide("AVT 私有仓库更新授权");
-        let ui = CREDUI_INFOW {
-            cbSize: size_of::<CREDUI_INFOW>() as u32,
-            hwndParent: owner,
-            pszMessageText: message.as_ptr(),
-            pszCaptionText: caption.as_ptr(),
-            hbmBanner: null_mut(),
-        };
-        let mut user = vec![0u16; 256];
-        let name = wide("GitHub");
-        user[..name.len()].copy_from_slice(&name);
-        let mut password = Zeroizing::new(vec![0u16; 2561]);
-        let mut save = 0;
-        let code = CredUIPromptForCredentialsW(
-            &ui,
-            wide(TARGET).as_ptr(),
-            null(),
-            0,
-            user.as_mut_ptr(),
-            user.len() as u32,
-            password.as_mut_ptr(),
-            password.len() as u32,
-            &mut save,
-            CREDUI_FLAGS_GENERIC_CREDENTIALS
-                | CREDUI_FLAGS_ALWAYS_SHOW_UI
-                | CREDUI_FLAGS_DO_NOT_PERSIST
-                | CREDUI_FLAGS_SHOW_SAVE_CHECK_BOX,
-        );
-        if code == ERROR_CANCELLED {
-            return Ok(None);
-        }
-        if code != 0 {
-            bail!("无法打开更新授权窗口（Windows 错误 {code}）。");
-        }
-        let n = password
-            .iter()
-            .position(|&c| c == 0)
-            .unwrap_or(password.len());
-        let token = Zeroizing::new(String::from_utf16_lossy(&password[..n]).trim().to_owned());
-        validate_token(&token)?;
-        if save != 0 {
-            save_token(&token)?;
-        } else {
-            forget_token()?;
-        }
-        Ok(Some(token))
     }
     /// # Safety
     /// hwnd must refer to a live window owned by the calling thread.
@@ -466,14 +341,6 @@ mod tests {
         assert!(parse_release(200, &serde_json::to_vec(&r).unwrap(), VERSION).is_err());
         r["draft"] = serde_json::json!(true);
         assert!(parse_release(200, &serde_json::to_vec(&r).unwrap(), VERSION).is_err());
-    }
-    #[test]
-    fn tokens_cannot_inject_headers() {
-        assert!(validate_token("github_pat_example123").is_ok());
-        assert!(validate_token("ghs_A-b.C_d+/=").is_ok());
-        for t in ["", "abc\r\nX-Evil: 1", "not a token", "abc\0def"] {
-            assert!(validate_token(t).is_err());
-        }
     }
 }
 

@@ -49,7 +49,7 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
 name = "avt-replenishment"
-version = "1.2.1"
+version = "1.3.0"
 dependencies = [
  "anyhow",
  "calamine",
@@ -64,7 +64,6 @@ dependencies = [
  "sha2",
  "tempfile",
  "windows-sys 0.59.0",
- "zeroize",
  "zip 0.6.6",
 ]
 
@@ -926,12 +925,6 @@ name = "windows_x86_64_msvc"
 version = "0.52.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
-
-[[package]]
-name = "zeroize"
-version = "1.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e13c156562582aa81c60cb29407084cdb54c4164760106ab78e6c5b0858cf64e"
 
 [[package]]
 name = "zip"

@@ -11,15 +11,13 @@ jobs:
         with:
           components: rustfmt, clippy
       - run: cargo fmt --check
-      - run: cargo test --locked
+      - run: cargo test --locked -- --test-threads=1
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo build --release --locked --bins
       - name: Verify executable replacement and restart
         run: ./tests/update-e2e.ps1
-      - name: Verify private release update check
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: $env:GH_TOKEN | & target/release/avt-cli.exe verify-update
+      - name: Verify public update without login
+        run: ./target/release/avt-cli.exe verify-update
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: windows-msvc
