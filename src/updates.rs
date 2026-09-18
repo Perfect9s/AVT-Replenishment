@@ -7,8 +7,11 @@ pub const REPOSITORY: &str = "Perfect9s/AVT-Replenishment";
 pub const RELEASES_PAGE: &str = "https://github.com/Perfect9s/AVT-Replenishment/releases";
 pub const API_PATH: &str = "/repos/Perfect9s/AVT-Replenishment/releases/latest";
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct UpdateInfo {
+    pub asset_id: u64,
+    pub asset_size: u64,
+    pub digest: Option<String>,
     pub latest: String,
     pub newer: bool,
     pub release_url: String,
@@ -22,6 +25,10 @@ struct Release {
 }
 #[derive(Deserialize)]
 struct Asset {
+    #[serde(default)]
+    id: u64,
+    #[serde(default)]
+    digest: Option<String>,
     name: String,
     state: String,
     size: u64,
@@ -71,9 +78,13 @@ pub fn parse_release(status: u32, bytes: &[u8], current: &str) -> Result<UpdateI
     {
         bail!("最新 Release 的 Windows 安装包尚未就绪，请稍后重试。");
     }
+    let asset = release.assets.iter().find(|a| a.name == expected).unwrap();
     // Construct the URL from the fixed repository and a validated SemVer tag;
     // never open a URL supplied in an untrusted release response.
     Ok(UpdateInfo {
+        asset_id: asset.id,
+        asset_size: asset.size,
+        digest: asset.digest.clone(),
         latest: v.to_string(),
         newer: v > current,
         release_url: format!("{RELEASES_PAGE}/tag/{tag}"),
@@ -126,28 +137,39 @@ pub mod windows {
 
     pub fn check_latest(token: &str) -> Result<UpdateInfo> {
         validate_token(token)?;
+        let (status, bytes, _) = request(
+            "api.github.com",
+            API_PATH,
+            Some(token),
+            false,
+            2 * 1024 * 1024,
+        )?;
+        parse_release(status, &bytes, VERSION)
+    }
+    fn request(
+        host: &str,
+        path: &str,
+        token: Option<&str>,
+        binary: bool,
+        limit: usize,
+    ) -> Result<(u32, Vec<u8>, Option<String>)> {
         unsafe {
             let session = Internet::new(WinHttpOpen(
-                wide("AVT-Replenishment/1.1").as_ptr(),
+                wide("AVT-Replenishment/1.2").as_ptr(),
                 WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
                 null(),
                 null(),
                 0,
             ))?;
             check(
-                WinHttpSetTimeouts(session.0, 5000, 5000, 10000, 10000),
-                "无法设置连接超时",
+                WinHttpSetTimeouts(session.0, 5000, 5000, 15000, 15000),
+                "无法设置超时",
             )?;
-            let connection = Internet::new(WinHttpConnect(
-                session.0,
-                wide("api.github.com").as_ptr(),
-                443,
-                0,
-            ))?;
+            let connection = Internet::new(WinHttpConnect(session.0, wide(host).as_ptr(), 443, 0))?;
             let request = Internet::new(WinHttpOpenRequest(
                 connection.0,
                 wide("GET").as_ptr(),
-                wide(API_PATH).as_ptr(),
+                wide(path).as_ptr(),
                 null(),
                 null(),
                 null(),
@@ -161,20 +183,23 @@ pub mod windows {
                     &redirect as *const _ as *const c_void,
                     size_of::<u32>() as u32,
                 ),
-                "无法限制更新重定向",
+                "无法限制重定向",
             )?;
-            let headers = Zeroizing::new(format!("Accept: application/vnd.github+json\r\nAuthorization: Bearer {token}\r\nX-GitHub-Api-Version: 2022-11-28\r\n"));
-            let header_wide = Zeroizing::new(wide(&headers));
+            let accept = if binary {
+                "application/octet-stream"
+            } else {
+                "application/vnd.github+json"
+            };
+            let mut headers = Zeroizing::new(format!(
+                "Accept: {accept}\r\nX-GitHub-Api-Version: 2022-11-28\r\n"
+            ));
+            if let Some(token) = token {
+                validate_token(token)?;
+                headers.push_str(&format!("Authorization: Bearer {token}\r\n"));
+            }
+            let h = Zeroizing::new(wide(&headers));
             check(
-                WinHttpSendRequest(
-                    request.0,
-                    header_wide.as_ptr(),
-                    (header_wide.len() - 1) as u32,
-                    null(),
-                    0,
-                    0,
-                    0,
-                ),
+                WinHttpSendRequest(request.0, h.as_ptr(), (h.len() - 1) as u32, null(), 0, 0, 0),
                 "无法连接 GitHub，请检查网络或系统代理",
             )?;
             check(
@@ -182,7 +207,7 @@ pub mod windows {
                 "无法接收 GitHub 响应",
             )?;
             let mut status = 0u32;
-            let mut length = size_of::<u32>() as u32;
+            let mut length = 4u32;
             check(
                 WinHttpQueryHeaders(
                     request.0,
@@ -194,16 +219,40 @@ pub mod windows {
                 ),
                 "无法读取更新状态",
             )?;
+            if status == 302 {
+                let mut location = vec![0u16; 16384];
+                let mut size = (location.len() * 2) as u32;
+                check(
+                    WinHttpQueryHeaders(
+                        request.0,
+                        WINHTTP_QUERY_LOCATION,
+                        null(),
+                        location.as_mut_ptr().cast(),
+                        &mut size,
+                        null_mut(),
+                    ),
+                    "无法读取下载地址",
+                )?;
+                let n = location
+                    .iter()
+                    .position(|c| *c == 0)
+                    .unwrap_or(location.len());
+                return Ok((
+                    status,
+                    Vec::new(),
+                    Some(String::from_utf16_lossy(&location[..n])),
+                ));
+            }
             if status != 200 {
-                return parse_release(status, &[], VERSION);
+                return Ok((status, Vec::new(), None));
             }
             let started = Instant::now();
             let mut bytes = Vec::new();
             loop {
-                if started.elapsed() > Duration::from_secs(30) {
-                    bail!("更新检查超时，请稍后重试。");
+                if started.elapsed() > Duration::from_secs(180) {
+                    bail!("下载超时，请重试。");
                 }
-                let mut chunk = [0u8; 8192];
+                let mut chunk = [0u8; 65536];
                 let mut read = 0;
                 check(
                     WinHttpReadData(
@@ -212,18 +261,47 @@ pub mod windows {
                         chunk.len() as u32,
                         &mut read,
                     ),
-                    "更新响应读取失败",
+                    "下载中断，请重试",
                 )?;
                 if read == 0 {
                     break;
                 }
-                bytes.extend_from_slice(&chunk[..read as usize]);
-                if bytes.len() > 2 * 1024 * 1024 {
-                    bail!("更新响应过大，已停止处理。");
+                if bytes.len() + read as usize > limit {
+                    bail!("下载文件超过大小限制。");
                 }
+                bytes.extend_from_slice(&chunk[..read as usize]);
             }
-            parse_release(status, &bytes, VERSION)
+            Ok((status, bytes, None))
         }
+    }
+    pub fn download_update(token: &str, info: &UpdateInfo) -> Result<Vec<u8>> {
+        if info.asset_id == 0 || info.asset_size > 64 * 1024 * 1024 {
+            bail!("更新包信息不完整或过大。");
+        }
+        let digest = info
+            .digest
+            .as_deref()
+            .context("更新包缺少 SHA-256 校验值，已停止更新")?;
+        let path = format!("/repos/{REPOSITORY}/releases/assets/{}", info.asset_id);
+        let (mut status, mut bytes, location) =
+            request("api.github.com", &path, Some(token), true, 64 * 1024 * 1024)?;
+        if status == 302 {
+            let location = location.context("缺少下载地址")?;
+            let path = super::asset_redirect_path(&location)?;
+            // GitHub's signed asset URL is used without forwarding the Token.
+            (status, bytes, _) = request(
+                "release-assets.githubusercontent.com",
+                path,
+                None,
+                true,
+                64 * 1024 * 1024,
+            )?;
+        }
+        if status != 200 {
+            bail!("更新包下载失败（HTTP {status}）。请确认 Token 的仓库只读权限。");
+        }
+        super::verify_package(&bytes, info.asset_size, digest)?;
+        Ok(bytes)
     }
 
     pub fn load_token() -> Result<Option<Zeroizing<String>>> {
@@ -433,5 +511,110 @@ mod native_tests {
             );
             DestroyWindow(hwnd);
         }
+    }
+}
+
+pub fn asset_redirect_path(url: &str) -> Result<&str> {
+    let path = url
+        .strip_prefix("https://release-assets.githubusercontent.com/")
+        .context("更新包下载地址不属于 GitHub，已停止")?;
+    if path.is_empty() || url.chars().any(|c| c.is_control() || c == '\\') {
+        bail!("更新包下载地址无效");
+    }
+    Ok(&url["https://release-assets.githubusercontent.com".len()..])
+}
+pub fn verify_package(bytes: &[u8], size: u64, digest: &str) -> Result<()> {
+    use sha2::{Digest, Sha256};
+    let expected = digest
+        .strip_prefix("sha256:")
+        .context("更新包校验算法不受支持")?;
+    if expected.len() != 64
+        || !expected.bytes().all(|b| b.is_ascii_hexdigit())
+        || bytes.len() as u64 != size
+        || format!("{:x}", Sha256::digest(bytes)) != expected.to_ascii_lowercase()
+    {
+        bail!("更新包大小或 SHA-256 校验失败，原程序未修改。");
+    }
+    Ok(())
+}
+pub fn extract_program(bytes: &[u8]) -> Result<Vec<u8>> {
+    use std::io::{Cursor, Read};
+    let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).context("更新包不是有效 ZIP")?;
+    let name = "AVT-Replenishment-Windows-x64/AVT-Replenishment.exe";
+    if archive.file_names().filter(|n| *n == name).count() != 1 {
+        bail!("更新包必须包含唯一的应用程序。");
+    }
+    let file = archive.by_name(name)?;
+    if file.size() > 64 * 1024 * 1024 {
+        bail!("更新程序超过大小限制。");
+    }
+    let mut exe = Vec::new();
+    file.take(64 * 1024 * 1024 + 1).read_to_end(&mut exe)?;
+    if exe.len() > 64 * 1024 * 1024 || exe.get(..2) != Some(b"MZ") {
+        bail!("更新程序格式无效。");
+    }
+    let offset = exe
+        .get(60..64)
+        .map(|s| u32::from_le_bytes(s.try_into().unwrap()) as usize)
+        .context("更新程序缺少 PE 标头")?;
+    if exe.get(offset..offset.saturating_add(6)) != Some(b"PE\0\0\x64\x86") {
+        bail!("更新程序不是 Windows x64 应用。");
+    }
+    Ok(exe)
+}
+#[cfg(test)]
+mod package_tests {
+    use super::*;
+    #[test]
+    fn download_integrity_and_redirect_boundaries() {
+        use sha2::{Digest, Sha256};
+        let bytes = b"package";
+        let digest = format!("sha256:{:x}", Sha256::digest(bytes));
+        verify_package(bytes, 7, &digest).unwrap();
+        assert!(verify_package(b"changed", 7, &digest).is_err());
+        assert!(verify_package(bytes, 8, &digest).is_err());
+        assert!(verify_package(bytes, 7, "sha256:bad").is_err());
+        assert_eq!(
+            asset_redirect_path("https://release-assets.githubusercontent.com/path?a=b").unwrap(),
+            "/path?a=b"
+        );
+        for url in [
+            "http://release-assets.githubusercontent.com/path",
+            "https://evil.com/path",
+            "https://release-assets.githubusercontent.com.evil.com/path",
+            "https://release-assets.githubusercontent.com@evil.com/path",
+            "https://release-assets.githubusercontent.com/\\evil",
+        ] {
+            assert!(asset_redirect_path(url).is_err());
+        }
+    }
+    #[test]
+    fn extracts_only_fixed_program_path() {
+        use std::io::{Cursor, Write};
+        let mut exe = vec![0u8; 128];
+        exe[..2].copy_from_slice(b"MZ");
+        exe[60..64].copy_from_slice(&64u32.to_le_bytes());
+        exe[64..70].copy_from_slice(b"PE\0\0\x64\x86");
+        let pack = |name: &str, data: &[u8]| {
+            let mut z = zip::ZipWriter::new(Cursor::new(Vec::new()));
+            z.start_file(name, zip::write::FileOptions::default())
+                .unwrap();
+            z.write_all(data).unwrap();
+            z.finish().unwrap().into_inner()
+        };
+        assert_eq!(
+            extract_program(&pack(
+                "AVT-Replenishment-Windows-x64/AVT-Replenishment.exe",
+                &exe
+            ))
+            .unwrap(),
+            exe
+        );
+        assert!(extract_program(&pack("../../AVT-Replenishment.exe", &exe)).is_err());
+        assert!(extract_program(&pack(
+            "AVT-Replenishment-Windows-x64/AVT-Replenishment.exe",
+            b"not exe"
+        ))
+        .is_err());
     }
 }

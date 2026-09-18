@@ -38,6 +38,7 @@ enum Job {
     Inspect(Result<Plan, String>),
     Fill(Result<Outcome, String>),
     Update(Result<UpdateInfo, String>),
+    Download(Result<avt_replenishment::self_update::Prepared, String>),
 }
 struct State {
     hwnd: HWND,
@@ -49,7 +50,7 @@ struct State {
     worker: Option<Receiver<Job>>,
     done: bool,
     token: Option<Zeroizing<String>>,
-    release_url: String,
+    available: Option<UpdateInfo>,
 }
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(Some(0)).collect()
@@ -89,9 +90,15 @@ impl State {
         SendMessageW(h, WM_SETFONT, self.font as usize, 1);
     }
     unsafe fn set_busy(&self, busy: bool) {
-        for id in [PATH, PICK, SCAN, BACKUP, ACK, UPDATE, AUTHORIZE, FORGET] {
+        for id in [
+            PATH, PICK, SCAN, BACKUP, ACK, UPDATE, AUTHORIZE, FORGET, RELEASE,
+        ] {
             EnableWindow(self.c(id), (!busy) as i32);
         }
+        EnableWindow(
+            self.c(RELEASE),
+            (!busy && self.available.as_ref().is_some_and(|i| i.newer)) as i32,
+        );
         self.ready();
     }
     unsafe fn ready(&self) {
@@ -172,11 +179,35 @@ impl State {
         let (tx, rx) = mpsc::channel();
         self.worker = Some(rx);
         self.set_busy(true);
+        self.available = None;
         text(self.c(STATUS), "正在检查 GitHub 正式版本…");
         std::thread::spawn(move || {
             let _ = tx.send(Job::Update(
                 updater::check_latest(&token).map_err(|e| format!("{e:#}")),
             ));
+        });
+    }
+    unsafe fn download_update(&mut self) {
+        if self.worker.is_some() {
+            return;
+        }
+        let (Some(token), Some(info)) = (self.token.clone(), self.available.clone()) else {
+            return;
+        };
+        if !info.newer {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        self.worker = Some(rx);
+        self.set_busy(true);
+        text(
+            self.c(STATUS),
+            "正在下载并校验新版，请稍候。成功后自动重启；补货表不会修改。",
+        );
+        std::thread::spawn(move || {
+            let result = updater::download_update(&token, &info)
+                .and_then(|bytes| avt_replenishment::self_update::prepare(&bytes));
+            let _ = tx.send(Job::Download(result.map_err(|e| format!("{e:#}"))));
         });
     }
     unsafe fn show_plan(&mut self, p: Plan) {
@@ -293,9 +324,12 @@ impl State {
                     text(self.c(NOTES), &msg);
                 }
                 Job::Update(Ok(info)) => {
-                    self.release_url = info.release_url;
                     let message = if info.newer {
-                        format!("发现新版本 v{}，当前 v{}。点击右上角“发布页”下载新版，解压后替换程序。", info.latest, updates::VERSION)
+                        format!(
+                            "发现新版本 v{}，当前 v{}。点击“下载并更新”，完成后自动重启。",
+                            info.latest,
+                            updates::VERSION
+                        )
                     } else {
                         format!(
                             "当前 v{}，最新正式版本 v{}，无需更新。",
@@ -303,7 +337,21 @@ impl State {
                             info.latest
                         )
                     };
+                    self.available = Some(info);
                     text(self.c(STATUS), &message);
+                }
+                Job::Download(Ok(prepared)) => {
+                    match avt_replenishment::self_update::launch(prepared) {
+                        Ok(()) => {
+                            PostMessageW(self.hwnd, WM_CLOSE, 0, 0);
+                        }
+                        Err(e) => {
+                            text(self.c(STATUS), &format!("无法启动更新：{e:#}"));
+                        }
+                    }
+                }
+                Job::Download(Err(e)) => {
+                    text(self.c(STATUS), &format!("更新未完成：{e}"));
                 }
                 Job::Update(Err(e)) => {
                     text(self.c(STATUS), &format!("更新检查失败：{e}"));
@@ -324,11 +372,11 @@ impl State {
         let table_h = (h - 430).max(130);
         for (id, x, y, ww, hh) in [
             (1, 24, 18, 260, 34),
-            (PIN, w - 548, 20, 108, 30),
-            (UPDATE, w - 432, 18, 108, 34),
-            (AUTHORIZE, w - 316, 18, 94, 34),
-            (FORGET, w - 214, 18, 94, 34),
-            (RELEASE, w - 112, 18, 88, 34),
+            (PIN, w - 596, 20, 108, 30),
+            (UPDATE, w - 480, 18, 108, 34),
+            (AUTHORIZE, w - 364, 18, 94, 34),
+            (FORGET, w - 262, 18, 94, 34),
+            (RELEASE, w - 160, 18, 136, 34),
             (2, 24, 59, w - 48, 25),
             (PATH, 24, 99, w - 240, 32),
             (PICK, w - 206, 98, 90, 34),
@@ -413,7 +461,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             worker: None,
             done: false,
             token: updater::load_token().unwrap_or(None),
-            release_url: updates::RELEASES_PAGE.into(),
+            available: None,
         });
         s.control(1, "STATIC", "AVT  补货计划填充", 0);
         SendMessageW(s.c(1), WM_SETFONT, title_font as usize, 1);
@@ -426,7 +474,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         s.control(UPDATE, "BUTTON", "检查更新", WS_TABSTOP);
         s.control(AUTHORIZE, "BUTTON", "更新授权", WS_TABSTOP);
         s.control(FORGET, "BUTTON", "清除授权", WS_TABSTOP);
-        s.control(RELEASE, "BUTTON", "发布页", WS_TABSTOP);
+        s.control(RELEASE, "BUTTON", "下载并更新", WS_TABSTOP);
+        EnableWindow(s.c(RELEASE), 0);
         s.control(
             2,
             "STATIC",
@@ -564,69 +613,55 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
     match msg {
         WM_SIZE => s.layout(),
         WM_TIMER => s.poll(),
-        WM_COMMAND => {
-            match (wp & 0xffff) as i32 {
-                PIN => {
-                    let pinned = SendMessageW(s.c(PIN), BM_GETCHECK, 0, 0) == BST_CHECKED as isize;
-                    if let Err(e) = updater::set_topmost(hwnd, pinned) {
-                        SendMessageW(
-                            s.c(PIN),
-                            BM_SETCHECK,
-                            if pinned { BST_UNCHECKED } else { BST_CHECKED } as usize,
-                            0,
+        WM_COMMAND => match (wp & 0xffff) as i32 {
+            PIN => {
+                let pinned = SendMessageW(s.c(PIN), BM_GETCHECK, 0, 0) == BST_CHECKED as isize;
+                if let Err(e) = updater::set_topmost(hwnd, pinned) {
+                    SendMessageW(
+                        s.c(PIN),
+                        BM_SETCHECK,
+                        if pinned { BST_UNCHECKED } else { BST_CHECKED } as usize,
+                        0,
+                    );
+                    text(s.c(STATUS), &e.to_string());
+                }
+            }
+            UPDATE => s.check_update(),
+            FORGET => {
+                s.token = None;
+                match updater::forget_token() {
+                    Ok(()) => {
+                        text(
+                            s.c(STATUS),
+                            "已清除本次会话及 Windows 凭据管理器中的更新授权。",
                         );
+                    }
+                    Err(e) => {
                         text(s.c(STATUS), &e.to_string());
                     }
                 }
-                UPDATE => s.check_update(),
-                FORGET => {
-                    s.token = None;
-                    match updater::forget_token() {
-                        Ok(()) => {
-                            text(
-                                s.c(STATUS),
-                                "已清除本次会话及 Windows 凭据管理器中的更新授权。",
-                            );
-                        }
-                        Err(e) => {
-                            text(s.c(STATUS), &e.to_string());
-                        }
-                    }
-                }
-                RELEASE => {
-                    let result = ShellExecuteW(
-                        hwnd,
-                        wide("open").as_ptr(),
-                        wide(&s.release_url).as_ptr(),
-                        null(),
-                        null(),
-                        SW_SHOWNORMAL,
-                    );
-                    if result as isize <= 32 {
-                        text(s.c(STATUS), "无法打开浏览器，请访问 github.com/Perfect9s/AVT-Replenishment/releases。");
-                    }
-                }
-                PICK => {
-                    let mut path = vec![0u16; 32768];
-                    let filter = wide("补货计划 (*.xlsx)\0*.xlsx\0\0");
-                    let mut dialog: OPENFILENAMEW = zeroed();
-                    dialog.lStructSize = size_of::<OPENFILENAMEW>() as u32;
-                    dialog.hwndOwner = hwnd;
-                    dialog.lpstrFilter = filter.as_ptr();
-                    dialog.lpstrFile = path.as_mut_ptr();
-                    dialog.nMaxFile = path.len() as u32;
-                    dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
-                    if GetOpenFileNameW(&mut dialog) != 0 {
-                        let n = path.iter().position(|&c| c == 0).unwrap_or(path.len());
-                        s.start(PathBuf::from(String::from_utf16_lossy(&path[..n])));
-                    }
-                }
-                SCAN => s.start(PathBuf::from(get_text(s.c(PATH)).trim().trim_matches('"'))),
-                FILL => s.fill(),
-                ACK => s.ready(),
-                _ => {}
             }
-        }
+            RELEASE => s.download_update(),
+            PICK => {
+                let mut path = vec![0u16; 32768];
+                let filter = wide("补货计划 (*.xlsx)\0*.xlsx\0\0");
+                let mut dialog: OPENFILENAMEW = zeroed();
+                dialog.lStructSize = size_of::<OPENFILENAMEW>() as u32;
+                dialog.hwndOwner = hwnd;
+                dialog.lpstrFilter = filter.as_ptr();
+                dialog.lpstrFile = path.as_mut_ptr();
+                dialog.nMaxFile = path.len() as u32;
+                dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+                if GetOpenFileNameW(&mut dialog) != 0 {
+                    let n = path.iter().position(|&c| c == 0).unwrap_or(path.len());
+                    s.start(PathBuf::from(String::from_utf16_lossy(&path[..n])));
+                }
+            }
+            SCAN => s.start(PathBuf::from(get_text(s.c(PATH)).trim().trim_matches('"'))),
+            FILL => s.fill(),
+            ACK => s.ready(),
+            _ => {}
+        },
         WM_DROPFILES => {
             let drop = wp as HDROP;
             let count = DragQueryFileW(drop, u32::MAX, null_mut(), 0);
@@ -662,7 +697,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         }
         WM_GETMINMAXINFO => {
             let info = &mut *(lp as *mut MINMAXINFO);
-            info.ptMinTrackSize.x = (850.0 * s.scale) as i32;
+            info.ptMinTrackSize.x = (960.0 * s.scale) as i32;
             info.ptMinTrackSize.y = (640.0 * s.scale) as i32;
         }
         _ => {

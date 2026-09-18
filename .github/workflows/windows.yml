@@ -14,11 +14,12 @@ jobs:
       - run: cargo test --locked
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo build --release --locked --bins
+      - name: Verify executable replacement and restart
+        run: ./tests/update-e2e.ps1
       - name: Verify private release update check
-        if: github.event_name == 'workflow_dispatch'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: $env:GH_TOKEN | & target/release/avt-cli.exe check-update
+        run: $env:GH_TOKEN | & target/release/avt-cli.exe verify-update
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: windows-msvc

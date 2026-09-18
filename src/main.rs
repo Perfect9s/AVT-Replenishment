@@ -3,7 +3,9 @@
 mod windows_ui;
 #[cfg(windows)]
 fn main() {
-    windows_ui::run();
+    if !avt_replenishment::self_update::handle_args() {
+        windows_ui::run();
+    }
 }
 #[cfg(not(windows))]
 fn main() {
