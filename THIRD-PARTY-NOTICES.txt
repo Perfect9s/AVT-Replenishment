@@ -1,4 +1,4 @@
-Third-party notices for AVT-Replenishment 1.1.0
+Third-party notices for AVT-Replenishment 1.2.0
 Build target: x86_64-pc-windows-msvc
 
 ========================================================================

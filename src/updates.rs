@@ -36,10 +36,10 @@ struct Asset {
 
 pub fn validate_token(token: &str) -> Result<()> {
     if token.is_empty()
-        || token.len() > 1024
+        || token.len() > 4096
         || !token
             .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+            .all(|b| b.is_ascii_alphanumeric() || b"-._~+/=".contains(&b))
     {
         bail!("请填写有效的 GitHub Token；不要填写 GitHub 登录密码。");
     }
@@ -342,6 +342,9 @@ pub mod windows {
     fn save_token(token: &str) -> Result<()> {
         unsafe {
             validate_token(token)?;
+            if token.len() > 2560 {
+                bail!("Token 过长，无法保存到凭据管理器；请不勾选保存，或使用仓库只读 Personal Access Token。");
+            }
             let mut target = wide(TARGET);
             let mut user = wide("GitHub Token");
             let cred = CREDENTIALW {
@@ -372,7 +375,7 @@ pub mod windows {
         let mut user = vec![0u16; 256];
         let name = wide("GitHub");
         user[..name.len()].copy_from_slice(&name);
-        let mut password = Zeroizing::new(vec![0u16; 1025]);
+        let mut password = Zeroizing::new(vec![0u16; 2561]);
         let mut save = 0;
         let code = CredUIPromptForCredentialsW(
             &ui,
@@ -467,6 +470,7 @@ mod tests {
     #[test]
     fn tokens_cannot_inject_headers() {
         assert!(validate_token("github_pat_example123").is_ok());
+        assert!(validate_token("ghs_A-b.C_d+/=").is_ok());
         for t in ["", "abc\r\nX-Evil: 1", "not a token", "abc\0def"] {
             assert!(validate_token(t).is_err());
         }
